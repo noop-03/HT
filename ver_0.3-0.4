@@ -1,0 +1,354 @@
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:table_calendar/table_calendar.dart';
+import 'package:fl_chart/fl_chart.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
+import 'dart:math';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+
+// ---------------- 모델 ----------------
+class Workout {
+  String name;
+  int calories;
+  DateTime date;
+
+  Workout({required this.name, required this.calories, required this.date});
+
+  Map<String, dynamic> toJson() => {
+        "name": name,
+        "calories": calories,
+        "date": date.toIso8601String(),
+      };
+
+  factory Workout.fromJson(Map<String, dynamic> json) {
+    return Workout(
+      name: json["name"],
+      calories: json["calories"],
+      date: DateTime.parse(json["date"]),
+    );
+  }
+}
+
+// ---------------- Provider ----------------
+class WorkoutProvider with ChangeNotifier {
+  List<Workout> _workouts = [];
+  final FlutterLocalNotificationsPlugin notificationsPlugin =
+      FlutterLocalNotificationsPlugin();
+
+  List<Workout> get workouts => _workouts;
+
+  Future<void> loadData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final data = prefs.getStringList("workouts") ?? [];
+    _workouts = data.map((e) => Workout.fromJson(jsonDecode(e))).toList();
+    notifyListeners();
+  }
+
+  Future<void> saveData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final data = _workouts.map((e) => jsonEncode(e.toJson())).toList();
+    await prefs.setStringList("workouts", data);
+  }
+
+  void addWorkout(Workout workout) {
+    _workouts.add(workout);
+    saveData();
+    notifyListeners();
+  }
+
+  void removeWorkout(Workout workout) {
+    _workouts.remove(workout);
+    saveData();
+    notifyListeners();
+  }
+
+  void updateWorkout(Workout oldWorkout, Workout newWorkout) {
+    final index = _workouts.indexOf(oldWorkout);
+    if (index != -1) {
+      _workouts[index] = newWorkout;
+      saveData();
+      notifyListeners();
+    }
+  }
+
+  Map<String, int> weeklyCalories() {
+    final now = DateTime.now();
+    final startOfWeek = now.subtract(Duration(days: now.weekday - 1));
+    final result = <String, int>{};
+    for (int i = 0; i < 7; i++) {
+      final day = startOfWeek.add(Duration(days: i));
+      final key = "${day.month}/${day.day}";
+      result[key] = _workouts
+          .where((w) =>
+              w.date.year == day.year &&
+              w.date.month == day.month &&
+              w.date.day == day.day)
+          .fold(0, (sum, w) => sum + w.calories);
+    }
+    return result;
+  }
+
+  Future<void> initNotifications() async {
+    const android = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const settings = InitializationSettings(android: android);
+    await notificationsPlugin.initialize(settings);
+
+    const androidDetails = AndroidNotificationDetails(
+      'daily_reminder',
+      'Daily Reminder',
+      channelDescription: 'Reminds you to log workouts',
+      importance: Importance.max,
+      priority: Priority.high,
+    );
+
+    await notificationsPlugin.periodicallyShow(
+      0,
+      '운동할 시간이에요!',
+      '오늘의 운동을 기록했나요?',
+      RepeatInterval.daily,
+      NotificationDetails(android: androidDetails),
+      androidAllowWhileIdle: true,
+    );
+  }
+}
+
+// ---------------- 메인 ----------------
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final provider = WorkoutProvider();
+  await provider.loadData();
+  await provider.initNotifications();
+
+  runApp(ChangeNotifierProvider(
+    create: (_) => provider,
+    child: const MyApp(),
+  ));
+}
+
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Workout Tracker',
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: const HomeScreen(),
+    );
+  }
+}
+
+// ---------------- 홈 ----------------
+class HomeScreen extends StatelessWidget {
+  const HomeScreen({super.key});
+
+  final List<String> motivationMessages = const [
+    "오늘도 파이팅!",
+    "작은 습관이 큰 변화를 만듭니다",
+    "어제보다 나은 오늘을 만들어봐요",
+    "꾸준함이 최고의 무기입니다",
+    "당신은 해낼 수 있습니다",
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final random = Random();
+    final message =
+        motivationMessages[random.nextInt(motivationMessages.length)];
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Workout Tracker')),
+      body: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            message,
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 40),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const WriteScreen()),
+              );
+            },
+            child: const Text("운동 기록하기"),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const StatisticScreen()),
+              );
+            },
+            child: const Text("운동 통계 보기"),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ---------------- 기록 ----------------
+class WriteScreen extends StatefulWidget {
+  const WriteScreen({super.key});
+
+  @override
+  State<WriteScreen> createState() => _WriteScreenState();
+}
+
+class _WriteScreenState extends State<WriteScreen> {
+  final nameController = TextEditingController();
+  final calorieController = TextEditingController();
+
+  final feedbackMessages = [
+    "좋은 선택이에요!",
+    "대단해요! 계속 유지해봐요",
+    "오늘도 성장했습니다",
+    "운동을 기록하다니 멋져요",
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = Provider.of<WorkoutProvider>(context, listen: false);
+
+    return Scaffold(
+      appBar: AppBar(title: const Text("운동 기록하기")),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            TextField(
+              controller: nameController,
+              decoration: const InputDecoration(labelText: "운동 이름"),
+            ),
+            TextField(
+              controller: calorieController,
+              decoration: const InputDecoration(labelText: "소모 칼로리"),
+              keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () {
+                if (nameController.text.isEmpty ||
+                    calorieController.text.isEmpty) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("모든 칸을 입력해주세요.")),
+                  );
+                  return;
+                }
+
+                final workout = Workout(
+                  name: nameController.text,
+                  calories: int.tryParse(calorieController.text) ?? 0,
+                  date: DateTime.now(),
+                );
+
+                provider.addWorkout(workout);
+
+                final random = Random();
+                final feedback =
+                    feedbackMessages[random.nextInt(feedbackMessages.length)];
+
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(feedback)),
+                );
+
+                nameController.clear();
+                calorieController.clear();
+              },
+              child: const Text("추가"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------- 통계 ----------------
+class StatisticScreen extends StatelessWidget {
+  const StatisticScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = Provider.of<WorkoutProvider>(context);
+    final weeklyData = provider.weeklyCalories();
+
+    return Scaffold(
+      appBar: AppBar(title: const Text("운동 통계")),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: BarChart(
+          BarChartData(
+            alignment: BarChartAlignment.spaceAround,
+            barGroups: weeklyData.entries
+                .map(
+                  (e) => BarChartGroupData(
+                    x: weeklyData.keys.toList().indexOf(e.key),
+                    barRods: [
+                      BarChartRodData(toY: e.value.toDouble(), color: Colors.blue)
+                    ],
+                  ),
+                )
+                .toList(),
+            titlesData: FlTitlesData(
+              leftTitles: const AxisTitles(
+                sideTitles: SideTitles(showTitles: true),
+              ),
+              bottomTitles: AxisTitles(
+                sideTitles: SideTitles(
+                  showTitles: true,
+                  getTitlesWidget: (value, meta) {
+                    if (value < 0 || value >= weeklyData.length) {
+                      return const SizedBox.shrink();
+                    }
+                    return Text(weeklyData.keys.elementAt(value.toInt()));
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------- 상세 ----------------
+class WorkoutDetailScreen extends StatelessWidget {
+  final Workout workout;
+
+  const WorkoutDetailScreen({super.key, required this.workout});
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = Provider.of<WorkoutProvider>(context, listen: false);
+
+    return Scaffold(
+      appBar: AppBar(title: Text(workout.name)),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text("운동 이름: ${workout.name}"),
+            Text("칼로리: ${workout.calories} kcal"),
+            Text("날짜: ${workout.date.toLocal()}"),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () {
+                provider.removeWorkout(workout);
+                Navigator.pop(context);
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text("삭제"),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
