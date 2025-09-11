@@ -1,0 +1,443 @@
+import 'dart:async';
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
+import 'package:provider/provider.dart';
+import 'package:table_calendar/table_calendar.dart';
+import 'package:fl_chart/fl_chart.dart';
+
+/// -----------------------------
+/// Models
+/// -----------------------------
+class WorkoutSet {
+  int id;
+  int workoutId;
+  int setIndex;
+  int reps;
+  bool done;
+
+  WorkoutSet({
+    this.id = 0,
+    required this.workoutId,
+    required this.setIndex,
+    required this.reps,
+    this.done = false,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'workoutId': workoutId,
+      'setIndex': setIndex,
+      'reps': reps,
+      'done': done ? 1 : 0,
+    };
+  }
+
+  static WorkoutSet fromMap(Map<String, dynamic> m) {
+    return WorkoutSet(
+      id: m['id'] as int,
+      workoutId: m['workoutId'] as int,
+      setIndex: m['setIndex'] as int,
+      reps: m['reps'] as int,
+      done: (m['done'] as int) == 1,
+    );
+  }
+}
+
+class Workout {
+  int id;
+  String title;
+  DateTime date;
+  int sets;
+  int reps;
+
+  Workout({
+    this.id = 0,
+    required this.title,
+    required this.date,
+    required this.sets,
+    required this.reps,
+  });
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'title': title,
+      'date': date.toIso8601String(),
+      'sets': sets,
+      'reps': reps,
+    };
+  }
+
+  static Workout fromMap(Map<String, dynamic> m) {
+    return Workout(
+      id: m['id'] as int,
+      title: m['title'] as String,
+      date: DateTime.parse(m['date'] as String),
+      sets: m['sets'] as int,
+      reps: m['reps'] as int,
+    );
+  }
+}
+
+/// -----------------------------
+/// Database Helper
+/// -----------------------------
+class DatabaseHelper {
+  static final DatabaseHelper instance = DatabaseHelper._();
+  static Database? _db;
+
+  DatabaseHelper._();
+
+  Future<Database> get database async {
+    if (_db != null) return _db!;
+    Directory dir = await getApplicationDocumentsDirectory();
+    String path = join(dir.path, "workout.db");
+    _db = await openDatabase(
+      path,
+      version: 1,
+      onCreate: (db, version) async {
+        await db.execute('''
+        CREATE TABLE workouts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT,
+          date TEXT,
+          sets INTEGER,
+          reps INTEGER
+        )
+        ''');
+        await db.execute('''
+        CREATE TABLE sets (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          workoutId INTEGER,
+          setIndex INTEGER,
+          reps INTEGER,
+          done INTEGER
+        )
+        ''');
+      },
+    );
+    return _db!;
+  }
+
+  Future<int> insertWorkout(Workout w) async {
+    final db = await database;
+    return await db.insert('workouts', w.toMap());
+  }
+
+  Future<int> insertSet(WorkoutSet s) async {
+    final db = await database;
+    return await db.insert('sets', s.toMap());
+  }
+
+  Future<List<Workout>> getWorkouts() async {
+    final db = await database;
+    final maps = await db.query('workouts', orderBy: "date DESC");
+    return maps.map((m) => Workout.fromMap(m)).toList();
+  }
+
+  Future<List<WorkoutSet>> getSets(int workoutId) async {
+    final db = await database;
+    final maps = await db.query('sets', where: 'workoutId=?', whereArgs: [workoutId]);
+    return maps.map((m) => WorkoutSet.fromMap(m)).toList();
+  }
+
+  Future<int> updateSet(WorkoutSet s) async {
+    final db = await database;
+    return db.update('sets', s.toMap(), where: 'id=?', whereArgs: [s.id]);
+  }
+
+  Future<int> deleteWorkout(int id) async {
+    final db = await database;
+    await db.delete('sets', where: 'workoutId=?', whereArgs: [id]);
+    return db.delete('workouts', where: 'id=?', whereArgs: [id]);
+  }
+}
+
+/// -----------------------------
+/// Provider
+/// -----------------------------
+class WorkoutProvider extends ChangeNotifier {
+  final db = DatabaseHelper.instance;
+  List<Workout> workouts = [];
+
+  Future<void> load() async {
+    workouts = await db.getWorkouts();
+    notifyListeners();
+  }
+
+  Future<void> addWorkout(Workout w) async {
+    final id = await db.insertWorkout(w);
+    for (int i = 0; i < w.sets; i++) {
+      await db.insertSet(
+        WorkoutSet(workoutId: id, setIndex: i + 1, reps: w.reps),
+      );
+    }
+    await load();
+  }
+
+  Future<void> toggleSetDone(int workoutId, int idx, bool done) async {
+    final list = await db.getSets(workoutId);
+    if (idx < list.length) {
+      list[idx].done = done;
+      notifyListeners(); // 먼저 UI 반영
+      unawaited(db.updateSet(list[idx])); // DB는 비동기로 처리
+    }
+  }
+
+  Future<List<WorkoutSet>> getSets(int workoutId) async {
+    return await db.getSets(workoutId);
+  }
+
+  Future<void> deleteWorkout(int id) async {
+    await db.deleteWorkout(id);
+    await load();
+  }
+
+  /// 최근 7일 운동량 집계 (세트 개수 기준)
+  Future<List<int>> getLast7DaysData() async {
+    await load();
+    DateTime now = DateTime.now();
+    List<int> data = List.filled(7, 0);
+
+    for (var w in workouts) {
+      int diff = now.difference(DateTime(w.date.year, w.date.month, w.date.day)).inDays;
+      if (diff >= 0 && diff < 7) {
+        data[6 - diff] += w.sets; // 최신일자 오른쪽
+      }
+    }
+    return data;
+  }
+}
+
+/// -----------------------------
+/// Main App
+/// -----------------------------
+void main() {
+  runApp(
+    ChangeNotifierProvider(
+      create: (_) => WorkoutProvider()..load(),
+      child: MyApp(),
+    ),
+  );
+}
+
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext ctx) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: MainScreen(),
+    );
+  }
+}
+
+/// -----------------------------
+/// Main Screen with BottomNavigation
+/// -----------------------------
+class MainScreen extends StatefulWidget {
+  @override
+  State<MainScreen> createState() => _MainScreenState();
+}
+
+class _MainScreenState extends State<MainScreen> {
+  int _currentIndex = 0;
+  final screens = [HomeScreen(), StatisticScreen()];
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: screens[_currentIndex],
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _currentIndex,
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.home), label: "홈"),
+          BottomNavigationBarItem(icon: Icon(Icons.bar_chart), label: "통계"),
+        ],
+        onTap: (i) => setState(() => _currentIndex = i),
+      ),
+    );
+  }
+}
+
+/// -----------------------------
+/// Home Screen
+/// -----------------------------
+class HomeScreen extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.watch<WorkoutProvider>();
+    return Scaffold(
+      appBar: AppBar(title: Text("운동 기록")),
+      body: ListView.builder(
+        itemCount: provider.workouts.length,
+        itemBuilder: (_, i) {
+          final w = provider.workouts[i];
+          return ListTile(
+            title: Text(w.title),
+            subtitle: Text("${w.date.toLocal()} | ${w.sets}세트 × ${w.reps}회"),
+            onTap: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => WorkoutDetailScreen(workout: w)),
+              );
+            },
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton(
+        child: Icon(Icons.add),
+        onPressed: () {
+          Navigator.push(context, MaterialPageRoute(builder: (_) => WriteScreen()));
+        },
+      ),
+    );
+  }
+}
+
+/// -----------------------------
+/// Write Screen
+/// -----------------------------
+class WriteScreen extends StatelessWidget {
+  final titleCtrl = TextEditingController();
+  final setsCtrl = TextEditingController();
+  final repsCtrl = TextEditingController();
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.read<WorkoutProvider>();
+    return Scaffold(
+      appBar: AppBar(title: Text("운동 추가")),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(children: [
+          TextField(controller: titleCtrl, decoration: InputDecoration(labelText: "운동명")),
+          TextField(controller: setsCtrl, decoration: InputDecoration(labelText: "세트 수"), keyboardType: TextInputType.number),
+          TextField(controller: repsCtrl, decoration: InputDecoration(labelText: "횟수"), keyboardType: TextInputType.number),
+          SizedBox(height: 20),
+          ElevatedButton(
+            child: Text("추가"),
+            onPressed: () async {
+              final w = Workout(
+                title: titleCtrl.text,
+                date: DateTime.now(),
+                sets: int.tryParse(setsCtrl.text) ?? 0,
+                reps: int.tryParse(repsCtrl.text) ?? 0,
+              );
+              await provider.addWorkout(w);
+              titleCtrl.clear();
+              setsCtrl.clear();
+              repsCtrl.clear();
+              Navigator.pop(context);
+            },
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+/// -----------------------------
+/// Workout Detail Screen
+/// -----------------------------
+class WorkoutDetailScreen extends StatelessWidget {
+  final Workout workout;
+
+  const WorkoutDetailScreen({required this.workout});
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.read<WorkoutProvider>();
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(workout.title),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.delete),
+            onPressed: () async {
+              await provider.deleteWorkout(workout.id);
+              Navigator.pop(context);
+            },
+          )
+        ],
+      ),
+      body: FutureBuilder<List<WorkoutSet>>(
+        future: provider.getSets(workout.id),
+        builder: (_, snap) {
+          if (!snap.hasData) return Center(child: CircularProgressIndicator());
+          final sets = snap.data!;
+          return ListView.builder(
+            itemCount: sets.length,
+            itemBuilder: (_, i) {
+              final s = sets[i];
+              return CheckboxListTile(
+                title: Text("${s.setIndex}세트 - ${s.reps}회"),
+                value: s.done,
+                onChanged: (val) {
+                  if (val != null) provider.toggleSetDone(workout.id, i, val);
+                },
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// -----------------------------
+/// Statistic Screen
+/// -----------------------------
+class StatisticScreen extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.watch<WorkoutProvider>();
+    return Scaffold(
+      appBar: AppBar(title: Text("운동 통계")),
+      body: FutureBuilder<List<int>>(
+        future: provider.getLast7DaysData(),
+        builder: (_, snap) {
+          if (!snap.hasData) return Center(child: CircularProgressIndicator());
+          final data = snap.data!;
+          return Padding(
+            padding: const EdgeInsets.all(16),
+            child: BarChart(
+              BarChartData(
+                barGroups: [
+                  for (int i = 0; i < 7; i++)
+                    BarChartGroupData(
+                      x: i,
+                      barRods: [
+                        BarChartRodData(
+                          toY: data[i].toDouble(),
+                          width: 16,
+                          borderRadius: BorderRadius.circular(6),
+                          gradient: LinearGradient(colors: [Colors.blue, Colors.lightBlueAccent]),
+                          rodStackItems: [],
+                        )
+                      ],
+                    ),
+                ],
+                titlesData: FlTitlesData(
+                  bottomTitles: AxisTitles(
+                    sideTitles: SideTitles(
+                      showTitles: true,
+                      getTitlesWidget: (v, meta) {
+                        final now = DateTime.now();
+                        final day = now.subtract(Duration(days: 6 - v.toInt()));
+                        return Text("${day.month}/${day.day}", style: TextStyle(fontSize: 10));
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
