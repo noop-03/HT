@@ -9,3 +9,6 @@
   flutter_local_notifications: ^17.1.2
   shared_preferences: ^2.5.3
   의존성들 flutter pub get 
+
+
+  https://drive.google.com/file/d/1Z_A3TGfUslif97TgdyQvmQGM1dl81ATS/view?usp=drive_link
